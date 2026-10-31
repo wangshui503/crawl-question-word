@@ -1,4 +1,4 @@
-"""仅导出名称为“卫法”的章节，将所有题目合并为一个 Word 文档。
+"""仅导出名称为“卫法”的学科，将其全部章节题目合并为一个 Word 文档。
 
 运行：python crawl_question.py
 先在网站重新登录，运行时粘贴新的 token（输入不会显示）。
@@ -279,23 +279,26 @@ def question_row(question, subject, chapter, qid):
     }
 
 
-def crawl(client, tag, save_dir, page_size=100, delay=0.15, include_explanation=True, chapter_name="卫法"):
+def crawl(client, tag, save_dir, page_size=100, delay=0.15, include_explanation=True, subject_name="卫法"):
     from docx import Document  # 在请求之前检查 Word 写入依赖。
 
-    chapter_name = chapter_name.strip()
-    if not chapter_name:
-        raise CrawlError("章节名称不能为空。")
+    target_subject = subject_name.strip()
+    if not target_subject:
+        raise CrawlError("学科名称不能为空。")
     print("正在获取学科列表...")
     subjects = list(client.pages("/user/subjects/", "items", {"tag": tag} if tag else {}, page_size))
     print(f"发现 {len(subjects)} 个学科")
     if not subjects:
         raise CrawlError("没有可访问的学科，请检查登录账号及 --tag。")
-    failures = matched_chapters = 0
+    failures = matched_subjects = matched_chapters = 0
     rows = []
     seen_questions = set()
     seen_chapters = set()
     for subject in subjects:
-        subject_name = as_text(subject.get("name")) or str(subject["id"])
+        subject_name = as_text(subject.get("name")).strip()
+        if subject_name != target_subject:
+            continue
+        matched_subjects += 1
         sid = quote(str(subject["id"]), safe="")
         print(f"\n学科：{subject_name}")
         try:
@@ -312,10 +315,9 @@ def crawl(client, tag, save_dir, page_size=100, delay=0.15, include_explanation=
             try:
                 if not isinstance(chapter, dict):
                     raise CrawlError("章节数据不是对象。")
-                if as_text(chapter.get("name")).strip() != chapter_name:
-                    continue
                 if not chapter.get("id"):
                     raise CrawlError("章节缺少 id。")
+                chapter_name = as_text(chapter.get("name")).strip() or str(chapter["id"])
                 cid = quote(str(chapter["id"]), safe="")
                 if cid in seen_chapters:
                     continue
@@ -342,17 +344,17 @@ def crawl(client, tag, save_dir, page_size=100, delay=0.15, include_explanation=
             except CrawlError as exc:
                 failures += 1
                 print(f"[章节失败] {exc}")
-    if not matched_chapters:
-        raise CrawlError(f"没有找到名称为 {chapter_name!r} 的章节（检索失败 {failures} 项）。请检查章节名称及 --tag，不生成 Word 文档。")
+    if not matched_subjects:
+        raise CrawlError(f"没有找到名称为 {target_subject!r} 的学科。请检查学科名称及 --tag，不生成 Word 文档。")
     if not rows:
-        raise CrawlError(f"章节 {chapter_name!r} 没有成功获取的题目，不生成空 Word 文档。失败 {failures} 项。")
-    stem = safe_filename(chapter_name) + "题库" + ("-部分结果" if failures else "")
+        raise CrawlError(f"学科 {target_subject!r} 没有成功获取的题目，不生成空 Word 文档。失败 {failures} 项。")
+    stem = safe_filename(target_subject) + "题库" + ("-部分结果" if failures else "")
     path = Path(save_dir) / (stem + ".docx")
     try:
-        save_word(rows, path, "", chapter_name, include_explanation, failures)
+        save_word(rows, path, target_subject, "", include_explanation, failures)
     except (OSError, ValueError) as exc:
         raise CrawlError(f"Word 保存失败：{path.name}：{exc}") from exc
-    print(f"\n已合并保存 {path}（匹配 {matched_chapters} 个章节、去重后 {len(rows)} 道题；失败 {failures} 项）。")
+    print(f"\n已合并保存 {path}（匹配 {matched_subjects} 个学科、遍历 {matched_chapters} 个章节、去重后 {len(rows)} 道题；失败 {failures} 项）。")
     if failures:
         raise CrawlError("已保存部分结果，爬取未全部成功，请根据上方提示处理后重试。")
 
@@ -360,15 +362,15 @@ def crawl(client, tag, save_dir, page_size=100, delay=0.15, include_explanation=
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", default="", help="可选学科标签（默认不限标签）")
-    parser.add_argument("--chapter", default="卫法", help="要导出的章节名称，精确匹配（默认：卫法）")
+    parser.add_argument("--subject", default="卫法", help="要导出的学科名称，精确匹配（默认：卫法），包含全部章节")
     parser.add_argument("--save-dir", type=Path, default=SAVE_DIR, help="Word 保存目录")
     parser.add_argument("--page-size", type=int, default=100, help="每页题目数（1-10000）")
     parser.add_argument("--no-explanation", action="store_true", help="不导出解析，只保留题目、选项和答案")
     args = parser.parse_args(argv)
     if not 1 <= args.page_size <= 10000:
         parser.error("--page-size 必须在 1 到 10000 之间")
-    if not args.chapter.strip():
-        parser.error("--chapter 不能为空")
+    if not args.subject.strip():
+        parser.error("--subject 不能为空")
     client = None
     try:
         token = os.environ.get("JIGUANG_TOKEN", "").strip() or TOKEN.strip()
@@ -377,7 +379,7 @@ def main(argv=None):
                 raise AuthError("请设置 JIGUANG_TOKEN 或在交互式终端运行并输入 token。")
             token = getpass.getpass("请输入重新登录后的 token（输入不显示）：")
         client = Client(token)
-        crawl(client, args.tag.strip(), args.save_dir, args.page_size, include_explanation=not args.no_explanation, chapter_name=args.chapter)
+        crawl(client, args.tag.strip(), args.save_dir, args.page_size, include_explanation=not args.no_explanation, subject_name=args.subject)
         return 0
     except (CrawlError, ImportError) as exc:
         print(f"错误：{exc}", file=sys.stderr)

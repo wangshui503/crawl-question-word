@@ -55,8 +55,8 @@ class Tests(unittest.TestCase):
 
         def get(path, params=None):
             return {
-                '/user/subjects/': {'items': [{'id': 's', 'name': '学科'}], 'has_more': False},
-                '/user/subjects/s': {'chapters': [{'id': 'c', 'name': '卫法'}]},
+                '/user/subjects/': {'items': [{'id': 's', 'name': '卫法'}], 'has_more': False},
+                '/user/subjects/s': {'chapters': [{'id': 'c', 'name': '法律责任'}]},
                 '/user/chapters/c': {'questions': [{'question_id': 'q'}], 'has_more': False},
                 '/user/questions/q': {'content': '题目内容', 'options': {'A': '选项一'}, 'correct_answer': 'A', 'explanation': '标准解析'},
             }[path]
@@ -76,7 +76,7 @@ class Tests(unittest.TestCase):
         client = m.Client('token')
         def get(path, params=None):
             if path == '/user/subjects/':
-                return {'items': [{'id': 's'}], 'has_more': False}
+                return {'items': [{'id': 's', 'name': '卫法'}], 'has_more': False}
             if path == '/user/subjects/s':
                 return {'chapters': [{'id': 'c', 'name': '卫法'}]}
             raise m.CrawlError('接口失败')
@@ -123,11 +123,9 @@ class Tests(unittest.TestCase):
         def get(path, params=None):
             calls.append((path, params))
             if path == '/user/subjects/':
-                return {'items': [{'id': 's1', 'name': '学科一'}, {'id': 's2', 'name': '学科二'}], 'has_more': False}
+                return {'items': [{'id': 's1', 'name': ' 卫法 '}, {'id': 's2', 'name': '卫法基础'}, {'id': 's3', 'name': '其他学科'}], 'has_more': False}
             if path == '/user/subjects/s1':
-                return {'chapters': [{'id': 'other', 'name': '卫法基础'}, {'id': 'c1', 'name': ' 卫法 '}]}
-            if path == '/user/subjects/s2':
-                return {'chapters': [{'id': 'c2', 'name': '卫法'}, {'id': 'other2', 'name': '其他章节'}]}
+                return {'chapters': [{'id': 'c1', 'name': '总则'}, {'id': 'c2', 'name': '法律责任'}]}
             if path == '/user/chapters/c1':
                 if params['skip'] == 0:
                     return {'questions': [{'id': 'q1'}], 'has_more': True}
@@ -139,12 +137,12 @@ class Tests(unittest.TestCase):
                 if fail_question and qid == 'q3':
                     raise m.CrawlError('题目详情失败')
                 return {'content': '卫法题目' + qid, 'options': {'A': '选项A', 'B': '选项B'}, 'correct_answer': 'A', 'explanation': '说明' + qid}
-            raise AssertionError('不应请求非目标章节：' + path)
+            raise AssertionError('不应请求非目标学科：' + path)
 
         client.get = get
         return client, calls
 
-    def test_only_exact_chapter_all_pages_merged_and_deduplicated(self):
+    def test_only_exact_subject_all_chapters_and_pages_merged_and_deduplicated(self):
         from docx import Document
         client, calls = self.merge_client()
         with tempfile.TemporaryDirectory() as directory:
@@ -157,8 +155,10 @@ class Tests(unittest.TestCase):
             self.assertIn('卫法题目q1', text)
             self.assertIn('卫法题目q3', text)
             self.assertEqual(text.count('卫法题目shared'), 1)
-            self.assertIn('来源：学科二 / 卫法', text)
+            self.assertIn('来源：卫法 / 总则', text)
+            self.assertIn('来源：卫法 / 法律责任', text)
         self.assertNotIn('tag', calls[0][1])
+        self.assertFalse(any(path in ('/user/subjects/s2', '/user/subjects/s3') for path, _ in calls))
         self.assertEqual(sum(path == '/user/questions/shared' for path, _ in calls), 1)
         self.assertTrue(any(path == '/user/chapters/c1' and params['skip'] == 1 for path, params in calls))
 
@@ -174,22 +174,21 @@ class Tests(unittest.TestCase):
             self.assertIn('2 道题', text)
             self.assertIn('部分结果', text)
 
-    def test_no_matching_chapter_does_not_fetch_questions_or_write(self):
+    def test_no_matching_subject_does_not_fetch_details_or_write(self):
         client = m.Client('token')
         client.get = Mock(side_effect=[
-            {'items': [{'id': 's'}], 'has_more': False},
-            {'chapters': [{'id': 'c', 'name': '卫法基础'}, {'name': '其他'}]},
+            {'items': [{'id': 's', 'name': '卫法基础'}, {'id': 'other', 'name': '其他'}], 'has_more': False},
         ])
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(m.CrawlError, '没有找到'):
                 m.crawl(client, '', directory, delay=0)
             self.assertEqual(list(Path(directory).iterdir()), [])
-        self.assertEqual(client.get.call_count, 2)
+        self.assertEqual(client.get.call_count, 1)
 
     def test_empty_matching_chapter_does_not_write(self):
         client = m.Client('token')
         client.get = Mock(side_effect=[
-            {'items': [{'id': 's'}], 'has_more': False},
+            {'items': [{'id': 's', 'name': '卫法'}], 'has_more': False},
             {'chapters': [{'id': 'c', 'name': '卫法'}]},
             {'questions': [], 'has_more': False},
         ])
@@ -216,14 +215,14 @@ class Tests(unittest.TestCase):
         with patch.dict(m.os.environ, {'JIGUANG_TOKEN': 'token'}), patch.object(m, 'Client') as client, patch.object(m, 'crawl') as crawl:
             self.assertEqual(m.main([]), 0)
             self.assertEqual(crawl.call_args.args[1], '')
-            self.assertEqual(crawl.call_args.kwargs['chapter_name'], '卫法')
+            self.assertEqual(crawl.call_args.kwargs['subject_name'], '卫法')
             client.return_value.session.close.assert_called_once()
 
-    def test_custom_chapter_and_tag_forwarded(self):
+    def test_custom_subject_and_tag_forwarded(self):
         with patch.dict(m.os.environ, {'JIGUANG_TOKEN': 'token'}), patch.object(m, 'Client'), patch.object(m, 'crawl') as crawl:
-            self.assertEqual(m.main(['--chapter', '其他章', '--tag', '三年级', '--no-explanation']), 0)
+            self.assertEqual(m.main(['--subject', '其他学科', '--tag', '三年级', '--no-explanation']), 0)
             self.assertEqual(crawl.call_args.args[1], '三年级')
-            self.assertEqual(crawl.call_args.kwargs['chapter_name'], '其他章')
+            self.assertEqual(crawl.call_args.kwargs['subject_name'], '其他学科')
             self.assertFalse(crawl.call_args.kwargs['include_explanation'])
 
 
